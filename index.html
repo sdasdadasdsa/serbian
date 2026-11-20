@@ -34,6 +34,12 @@ h1{font-size:clamp(29px,4.8vw,47px);letter-spacing:-.048em;margin:0 0 11px;line-
 .speak{display:inline-flex;align-items:center;gap:8px;border:1px solid rgba(142,174,201,.18);border-radius:999px;background:rgba(255,255,255,.035);color:#adc5d9;padding:8px 15px;font-size:12px;transition:.2s}
 .speak:hover{border-color:rgba(116,229,187,.45);color:var(--mint)}
 .speaker{font-size:16px;line-height:1}
+.speech-options{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:8px 12px}
+.speech-alternative{font-size:12px;color:var(--blue);text-decoration:none;text-underline-offset:3px}
+.speech-alternative:hover{text-decoration:underline;color:#c3d7ff}
+.speech-status{min-height:15px;margin:9px 10px 0;color:var(--muted);font-size:11px;line-height:1.4;max-width:540px}
+.speech-status.warning{color:var(--amber)}
+
 .answer-section{padding:14px 29px 30px}
 .field-label{display:block;color:#9fb2c5;font-size:13px;margin:0 0 10px;font-weight:650}
 .input-wrap{display:flex;align-items:center;background:rgba(5,13,25,.55);border:1px solid rgba(154,183,209,.2);border-radius:14px;transition:border-color .2s,box-shadow .2s}
@@ -100,7 +106,7 @@ h1{font-size:clamp(29px,4.8vw,47px);letter-spacing:-.048em;margin:0 0 11px;line-
   <header class="topbar">
     <div class="logo"><div class="logo-mark">✦</div>SRPSKI <span>50</span></div>
     <div class="top-right">
-      <div class="chip">СЕРБСКИЙ A1–A2 · v1.0</div>
+      <div class="chip">СЕРБСКИЙ A1–A2 · v1.1</div>
       <div class="chip" id="bankCount">База слов</div>
       <button class="chip script-toggle" type="button" id="scriptToggle" title="Переключить сербскую латиницу / кириллицу">ЛАТИНИЦА ⇄</button>
       <button class="reset-btn" id="resetBtn" title="Начать эти же 50 слов заново">↻ Сначала</button>
@@ -325,6 +331,7 @@ function updateStats(){
   $('gamesStat').textContent=data.games;
 }
 function render(){
+  stopSpeech();
   const s=data.session; if(!s)return;
   updateStats();
   const game=$('game');
@@ -340,7 +347,7 @@ function render(){
   const feedback=s.phase==='feedback';
   const correct=feedback&&['correct','accepted'].includes(s.feedback.kind);
   game.innerHTML=`<div class="card-top"><div class="eyebrow">ПЕРЕВЕДИ НА РУССКИЙ</div><div class="round-pill">КРУГ ${s.round} · ${s.index+1} / ${s.queue.length}</div></div>
-  <div class="word-box"><div class="word" lang="sr">${escapeHTML(scriptMode==='cyr'?toCyrillic(en):en)}</div><button id="speak" class="speak" type="button"><span class="speaker">◖))</span> Послушать произношение</button></div>
+  <div class="word-box"><div class="word" lang="sr">${escapeHTML(scriptMode==='cyr'?toCyrillic(en):en)}</div><div class="speech-options"><button id="speak" class="speak" type="button"><span class="speaker">◖))</span> Послушать произношение</button><a id="onlineSpeak" class="speech-alternative" href="${googleTranslateUrl(en)}" target="_blank" rel="noopener noreferrer" aria-label="Послушать произношение слова в Google Переводчике">Озвучка в Google ↗</a></div><p class="speech-status" id="speechStatus" role="status" aria-live="polite"></p></div>
   <div class="answer-section" id="answerSection"></div>`;
   $('speak').addEventListener('click',()=>speak(en));
   const area=$('answerSection');
@@ -362,9 +369,76 @@ function render(){
   }
 }
 function plural(num,one,two,many){let n=Math.abs(num)%100;let n1=n%10;return n>10&&n<20?many:n1===1?one:n1>=2&&n1<=4?two:many;}
+// Do not let Chrome silently use an English/Russian voice for Serbian.
+let spokenAudio=null;
+let spokenUtterance=null;
+let speechSerial=0;
+function googleTranslateUrl(word){
+  return 'https://translate.google.com/?sl=sr&tl=ru&text='+encodeURIComponent(word)+'&op=translate';
+}
+function speechStatus(message,warning=false){
+  const el=$('speechStatus');
+  if(el){el.textContent=message;el.classList.toggle('warning',warning);}
+}
+function availableSerbianVoices(){
+  if(!('speechSynthesis' in window))return [];
+  return speechSynthesis.getVoices().filter(v=>/^(sr|bs|hr)(?:[-_]|$)/i.test(v.lang||''));
+}
+function bestSpeechVoice(){
+  const list=availableSerbianVoices();
+  function rank(v){
+    const lang=(v.lang||'').toLowerCase();
+    const name=(v.name||'').toLowerCase();
+    const locale=lang.startsWith('sr')?100:lang.startsWith('bs')?65:30;
+    const quality=/natural|neural|online/.test(name)?20:0;
+    const preferredScript=scriptMode==='cyr'?/cyrl|cyril/.test(lang+name):/latn|latin/.test(lang+name);
+    return locale+quality+(preferredScript?5:0);
+  }
+  return list.sort((a,b)=>rank(b)-rank(a))[0]||null;
+}
+function stopSpeech(){
+  speechSerial++;
+  if(spokenAudio){spokenAudio.pause();spokenAudio.src='';spokenAudio=null;}
+  if('speechSynthesis' in window){try{speechSynthesis.cancel();}catch{}}
+  spokenUtterance=null;
+}
+function playOnlineSerbian(word,serial){
+  if(serial!==speechSerial)return;
+  // Best-effort online audio; the official Translate link is a reliable fallback.
+  speechStatus('Пробую онлайн-озвучку сербского…');
+  const url='https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=sr&q='+encodeURIComponent(word);
+  const audio=new Audio(url);
+  spokenAudio=audio;
+  let settled=false;
+  const fail=()=>{
+    if(settled||serial!==speechSerial)return;
+    settled=true;
+    speechStatus('Нет подходящего голоса или онлайн-аудио недоступно. Нажми «Озвучка в Google» рядом.',true);
+  };
+  audio.onplaying=()=>{if(serial===speechSerial){settled=true;speechStatus('Онлайн-озвучка · сербский');}};
+  audio.onerror=fail;
+  audio.onended=()=>{if(serial===speechSerial && spokenAudio===audio)spokenAudio=null;};
+  audio.play().catch(fail);
+}
 function speak(word){
-  if(!('speechSynthesis' in window))return;
-  try{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(word);u.lang='sr-RS';u.rate=.84;speechSynthesis.speak(u);}catch(err){console.warn(err);}
+  stopSpeech();
+  const serial=speechSerial;
+  const voice=bestSpeechVoice();
+  if(!voice){playOnlineSerbian(word,serial);return;}
+  try{
+    const isSerbian=/^sr(?:[-_]|$)/i.test(voice.lang||'');
+    const needsCyrillic=isSerbian && !/latn|latin/i.test(voice.lang+' '+voice.name);
+    const text=needsCyrillic?toCyrillic(word):word;
+    const u=new SpeechSynthesisUtterance(text);
+    spokenUtterance=u;
+    u.lang=voice.lang;
+    u.voice=voice;
+    u.rate=.95;
+    u.pitch=1;
+    u.onerror=e=>{if(serial===speechSerial && e.error!=='canceled' && e.error!=='interrupted')playOnlineSerbian(word,serial);};
+    speechStatus(isSerbian?'Сербский голос: '+voice.name:'Близкий '+(/^bs/i.test(voice.lang)?'боснийский':'хорватский')+' голос: '+voice.name+' (для сербского лучше выбрать «Озвучка в Google»)',!isSerbian);
+    speechSynthesis.speak(u);
+  }catch(err){console.warn('Ошибка озвучки:',err);playOnlineSerbian(word,serial);}
 }
 document.addEventListener('keydown',e=>{
   if(e.key==='Enter' && data.session?.phase==='feedback'){
