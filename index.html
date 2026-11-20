@@ -438,12 +438,40 @@ async function getSerbianAudio(word){
   if(blob.size<500)throw new Error('Получен пустой звуковой файл');
   return {url:rememberAudio(word,blob),name:voice.label};
 }
+function playbackAudio(url,sequence,name){
+  return new Promise((resolve,reject)=>{
+    if(sequence!==speechSequence){reject(new Error('stale'));return;}
+    const audio=new Audio();
+    audio.preload='auto';
+    let finished=false;
+    const fail=()=>{
+      if(finished)return;
+      finished=true;
+      reject(new Error('Не удалось получить MP3'));
+    };
+    audio.onerror=fail;
+    audio.onended=()=>{
+      if(sequence!==speechSequence)return;
+      activeAudio=null;
+      speechNote('Сербский голос '+name+' · нажми ещё раз, чтобы повторить');
+    };
+    audio.src=url;
+    activeAudio=audio;
+    audio.play().then(()=>{
+      if(finished || sequence!==speechSequence){audio.pause();return;}
+      finished=true;
+      speechNote('Сербский голос '+name+' · воспроизведение');
+      resolve();
+    }).catch(fail);
+  });
+}
 async function speak(word){
   stopSpeech();
   const mySequence=speechSequence;
   const b=$('speak');
   if(b)b.disabled=true;
   speechNote('Загружаю сербское произношение…');
+  const attempts=[];
   try{
     let url=audioCache.get(word);
     let name='Sophie';
@@ -452,24 +480,32 @@ async function speak(word){
       url=result.url;name=result.name;
     }
     if(mySequence!==speechSequence)return;
-    const audio=new Audio(url);
-    activeAudio=audio;
-    audio.onended=()=>{
-      if(mySequence!==speechSequence)return;
-      activeAudio=null;
-      speechNote('Сербский голос '+name+' · нажми ещё раз, чтобы повторить');
-    };
-    audio.onerror=()=>{if(mySequence===speechSequence)speechNote('Не удалось воспроизвести аудио. Попробуй ещё раз.',true);};
-    await audio.play();
-    if(mySequence!==speechSequence){audio.pause();return;}
-    speechNote('Сербский голос '+name+' · воспроизведение');
-  }catch(error){
+    await playbackAudio(url,mySequence,name);
+    return;
+  }catch(err){
     if(mySequence!==speechSequence)return;
-    console.warn('Serbian neural audio unavailable:',error);
-    speechNote('Сервис озвучки сейчас недоступен. Можно попробовать ещё раз чуть позже.',true);
+    attempts.push(String(err));
   }finally{
-    if(mySequence===speechSequence && b)b.disabled=false;
+    if(mySequence===speechSequence&&b)b.disabled=false;
   }
+  // Some browsers block cross-origin fetch, even while accepting a direct audio src.
+  // Official API docs also advertise GET /api/tts: use it without JS access to response.
+  const query=encodeURIComponent(toCyrillic(word));
+  const getUrls=[
+    SERBIAN_TTS_API+'/api/tts?text='+query+'&voice=sr-RS-SophieNeural',
+    SERBIAN_TTS_API+'/api/tts?text='+query+'&voice=sr-RS'
+  ];
+  for(const src of getUrls){
+    if(mySequence!==speechSequence)return;
+    try{
+      speechNote('Подключаю прямую аудиодорожку…');
+      await playbackAudio(src,mySequence,'Sophie');
+      return;
+    }catch(err){attempts.push(String(err));}
+  }
+  if(mySequence!==speechSequence)return;
+  speechNote('Не удалось загрузить голос: сервис временно недоступен или браузер блокирует соединение.',true);
+  console.warn('Serbian speech failed:',attempts);
 }
 document.addEventListener('keydown',e=>{
   if(e.key==='Enter' && data.session?.phase==='feedback'){
